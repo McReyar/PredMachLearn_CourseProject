@@ -1,0 +1,179 @@
+---
+title: "Predicting Exercise Type"
+author: "McReyar"
+date: "Practical Machine Learning (predmachlearn-004) / Coursera"
+output:
+  html_document:
+    fig_width: 12
+    highlight: pygments
+    keep_md: yes
+    theme: journal
+---
+##Synopsis
+In this paper activities are predicted based on the data of wearable accelerometers. After loading and preprocessing the data, several different models and tuning parameters are built and the best model is selected. Finally the best model is used to make predictions on a test dataset.
+
+##Data Preparation
+Following libraries are used for this project:
+```{r libaries, warning=FALSE}
+library(knitr)
+library(lattice)
+library(ggplot2)
+library(caret)
+library(glmnet)
+library(rpart)
+library(kernlab)
+library(randomForest)
+```
+
+###Data Source and Format
+For the analysis the dataset [Human Activity Recognition][1] is used which was gathered by Velloso, Bulling, Gellersen, Ugulino and Fuks[^1].
+```{r download}
+if(!file.exists("pml-training.csv") | !file.exists("pml-testing.csv")) {
+    download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+                 ,destfile = "pml-training.csv")
+    download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+                 ,destfile = "pml-testing.csv")
+    download.date <- format(Sys.time(),"%m/%d/%Y %I:%M %p %Z", tz = "UTC")
+}
+```
+For this paper the file has been downloaded on `r download.date`.
+
+The data is separated by commas and "NA", "" or "#DIV/0!" are interpreted as missing values. The first 7 columns aren't read, because they include IDs, names, timestamps and other data that is not relevant for the analysis.
+```{r read}
+pml      <- read.csv("pml-training.csv", na.strings = c("\"\"","NA","#DIV/0!")
+                    ,colClasses = c(rep("NULL",7),rep(NA,152),"factor"))
+predict  <- read.csv("pml-testing.csv", na.strings = c("\"\"","NA","#DIV/0!")
+                    ,colClasses = c(rep("NULL",7),rep(NA,152),"NULL"))
+```
+For estimating the out of sample error, 30% of the data is set aside as testing set.
+```{r split}
+set.seed(157885)
+inTrain <- sort(createDataPartition(y = pml$classe, p = 0.7, list = FALSE))
+training   <- pml[ inTrain,]
+testing    <- pml[-inTrain,]
+```
+
+###Missing Values
+```{r missing}
+naCols <- colSums(is.na(training))
+sumMissing <- sum(naCols > 0)
+minMissing <- min(naCols[naCols > 0])
+```
+There are `r sumMissing` columns with missing values and for each of these the values are missing for the majority of rows (at least `r as.character(minMissing)`). Because of this, imputing the missing values  isn't feasible and the columns are therefore discarded for further analysis. 
+```{r delcol}
+for(n in seq(ncol(training),1)) {
+    if(naCols[n] > 0) {
+        training[,n] <- NULL
+        testing[,n]  <- NULL
+        pml[,n]      <- NULL
+        predict[,n]  <- NULL
+    }
+}
+dim(training)
+```
+Because there are still `r ncol(training)` columns left, a summary isn't printed in this paper, although it was checked for the analysis.
+
+
+##Training Models
+The activity classes have following frequencies
+```{r baseline, results='asis'}
+kable(data.frame(Activity  = levels(training$classe)
+                ,Frequency = paste0(round(100*prop.table(table(training$classe)),2),"%")
+                )
+     ,format = "html")
+```
+Therefore the baseline for our model is an accuracy of `r max(round(100*prop.table(table(training$classe)),2))`%.  
+
+For tuning the models 5-fold cross validation is used.
+```{r trControl}
+trControl <- trainControl(method = "cv", number = 5)
+```
+To get the best final model following methods are used and compared:
+
+* Regularized Generalized Linear Model
+* Decision Tree
+* Support Vector Machine (linear kernel)
+* Support Vector Machine (radial kernel)
+* Random Forest  
+For all models numeric values are centered and scaled.
+
+###Regularized Generalized Linear Model (glmnet)
+```{r glm, cache = TRUE}
+set.seed(157885)
+model.glm <- train(classe ~ ., data = training, method = "glmnet"
+                   ,trControl = trControl, preProcess = c("center","scale")
+)
+print(model.glm)
+```
+###Decision Tree (CART)
+```{r rpart, cache = TRUE}
+set.seed(157885)
+model.rpart <- train(classe ~ ., data = training, method = "rpart"
+                     ,trControl = trControl, preProcess = c("center","scale")
+)
+print(model.rpart)
+```
+###Support Vector Machine (linear kernel)
+```{r svml, cache = TRUE}
+set.seed(157885)
+model.svml <- train(classe ~ ., data = training, method = "svmLinear"
+                    ,trControl = trControl, preProcess = c("center","scale")
+)
+print(model.svml)
+```
+###Support Vector Machine (radial kernel)
+```{r svmr, cache = TRUE}
+set.seed(157885)
+model.svmr <- train(classe ~ ., data = training, method = "svmRadial"
+                    ,trControl = trControl, preProcess = c("center","scale")
+)
+print(model.svmr)
+```
+###Random Forrests
+```{r rf, cache = TRUE}
+set.seed(157885)
+model.rf <- train(classe ~ ., data = training, method = "rf"
+                  ,trControl = trControl, preProcess = c("center","scale")
+)
+print(model.rf)
+```
+##Model Selection
+Finally the accuracy of the five models is compared:
+```{r modsel}
+resamps <- resamples(list(model.glm, model.rpart, model.svml, model.svmr, model.rf)
+                     ,modelNames = c("Linear Model"
+                                    ,"Decision Tree"
+                                    ,"SVM (linear)"
+                                    ,"SVM (radial)"
+                                    ,"Random Forest"))
+trellis.par.set(caretTheme())
+dotplot(resamps, metric = "Accuracy")
+```
+As can be seen, Random Forest has by far the highest accuary (`r round(100*max(model.rf$results$Accuracy),2)`%). With so much more accuracy a loss of interpretability seems to be acceptable. Further optimization by model stacking seems not to be worth the effort.
+
+##Final Model
+With the best model the activity of the test data is predicted and compared with the real activity.
+```{r confMat}
+confMat <- confusionMatrix(predict(model.rf, newdata=testing), testing$classe)
+print(confMat)
+```
+Similar to the accuracy obtained by cross validation, the out of sample accuracy is also very high (`r round(100*confMat$overall[1],2)`)%. We would expect about `r round(100*(1-confMat$overall[1]),2)`% classification errors.
+
+As these results confirm the findings based on cross validation, the final model is built with random forest and the parameters of the best model on the whole dataset.
+```{r finalModel}
+finalModel <- train(classe ~ ., data = pml, method = "rf"
+                   ,preProcess = c("center","scale")
+                   ,trControl  = trainControl(method = "none")
+                   ,tuneGrid   = model.rf$bestTune
+                   )
+```
+This model is used to make a prediction on the 20 real-world cases for which the real activity is not known.
+```{r predict, results='asis'}
+kable(data.frame(Row = row.names(predict)
+                ,Prediction = predict(finalModel, newdata=predict)))
+```
+
+#References
+[^1]: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+[1]: http://groupware.les.inf.puc-rio.br/har
